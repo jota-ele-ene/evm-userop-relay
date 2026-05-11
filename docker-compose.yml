@@ -1,0 +1,17 @@
+version: '3.9'
+
+services:
+  relay:
+    build: .
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      - ALCHEMY_API_KEY=${ALCHEMY_API_KEY}
+      - ALCHEMY_GAS_POLICY_ID=${ALCHEMY_GAS_POLICY_ID}
+      - OWNER_PRIVATE_KEY=${OWNER_PRIVATE_KEY}
+      - TARGET_CONTRACT_ADDRESS=${TARGET_CONTRACT_ADDRESS}
+      - NETWORK=${NETWORK:-sepolia}
+      - PORT=3000
+    env_file:
+      - .env
+    restart: unless-stopped
