@@ -1,0 +1,18 @@
+{
+  "name": "evm-userop-relay",
+  "version": "1.0.0",
+  "description": "Node.js API that submits POST body as calldata in an ERC-4337 UserOperation via Alchemy Gas Manager",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "@alchemy/aa-alchemy": "^4.1.0",
+    "@alchemy/aa-core": "^4.1.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "viem": "^2.13.6"
+  }
+}
