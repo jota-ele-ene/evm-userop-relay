@@ -1,5 +1,7 @@
-import { createModularAccountAlchemyClient } from '@alchemy/aa-alchemy';
-import { LocalAccountSigner } from '@alchemy/aa-core';
+import "dotenv/config";
+import { createLightAccountAlchemyClient } from "@alchemy/aa-alchemy";
+import { LocalAccountSigner } from "@alchemy/aa-core";
+import { encodeFunctionData, keccak256, stringToHex } from "viem";
 import {
   sepolia,
   polygon,
@@ -7,7 +9,7 @@ import {
   optimism,
   arbitrum,
   mainnet,
-} from 'viem/chains';
+} from "@account-kit/infra";
 
 const CHAIN_MAP = {
   sepolia,
@@ -18,82 +20,161 @@ const CHAIN_MAP = {
   mainnet,
 };
 
-// Lazily-created singleton client (one per process lifetime)
-let _client = null;
+const JSON_REGISTRY_ABI = [
+  {
+    type: "function",
+    name: "registerRecord",
+    stateMutability: "nonpayable",
+    inputs: [
+      {
+        name: "input",
+        type: "tuple",
+        components: [
+          { name: "title", type: "string" },
+          { name: "body", type: "string" },
+          { name: "category", type: "string" },
+          { name: "createdAt", type: "uint256" },
+          { name: "externalId", type: "bytes32" },
+        ],
+      },
+    ],
+    outputs: [],
+  },
+];
 
-async function getClient() {
-  if (_client) return _client;
+let clientPromise = null;
 
-  const {
-    ALCHEMY_API_KEY,
-    ALCHEMY_GAS_POLICY_ID,
-    OWNER_PRIVATE_KEY,
-    NETWORK = 'sepolia',
-  } = process.env;
+async function getProvider() {
+  if (clientPromise) return clientPromise;
 
-  if (!ALCHEMY_API_KEY) throw new Error('Missing ALCHEMY_API_KEY in env');
-  if (!ALCHEMY_GAS_POLICY_ID) throw new Error('Missing ALCHEMY_GAS_POLICY_ID in env');
-  if (!OWNER_PRIVATE_KEY) throw new Error('Missing OWNER_PRIVATE_KEY in env');
+  clientPromise = (async () => {
+    const {
+      ALCHEMY_API_KEY,
+      ALCHEMY_GAS_POLICY_ID,
+      OWNER_PRIVATE_KEY,
+      NETWORK = "sepolia",
+    } = process.env;
 
-  const chain = CHAIN_MAP[NETWORK.toLowerCase()];
-  if (!chain) throw new Error(`Unsupported NETWORK "${NETWORK}". Choose: ${Object.keys(CHAIN_MAP).join(', ')}`);
+    if (!ALCHEMY_API_KEY) throw new Error("Missing ALCHEMY_API_KEY in env");
+    if (!ALCHEMY_GAS_POLICY_ID) throw new Error("Missing ALCHEMY_GAS_POLICY_ID in env");
+    if (!OWNER_PRIVATE_KEY) throw new Error("Missing OWNER_PRIVATE_KEY in env");
 
-  const privateKey = OWNER_PRIVATE_KEY.startsWith('0x')
-    ? OWNER_PRIVATE_KEY
-    : `0x${OWNER_PRIVATE_KEY}`;
+    const chain = CHAIN_MAP[NETWORK.toLowerCase()];
+    if (!chain) {
+      throw new Error(
+        `Unsupported NETWORK "${NETWORK}". Choose: ${Object.keys(CHAIN_MAP).join(", ")}`
+      );
+    }
 
-  const signer = LocalAccountSigner.privateKeyToAccountSigner(privateKey);
+    const privateKey = OWNER_PRIVATE_KEY.startsWith("0x")
+      ? OWNER_PRIVATE_KEY
+      : `0x${OWNER_PRIVATE_KEY}`;
 
-  _client = await createModularAccountAlchemyClient({
-    apiKey: ALCHEMY_API_KEY,
-    chain,
-    signer,
-    gasManagerConfig: {
-      policyId: ALCHEMY_GAS_POLICY_ID,
-    },
-  });
+    const signer = LocalAccountSigner.privateKeyToAccountSigner(privateKey);
 
-  console.log('[aa-client] Smart Account address:', _client.getAddress());
-  return _client;
+    const provider = await createLightAccountAlchemyClient({
+      apiKey: ALCHEMY_API_KEY,
+      chain,
+      signer,
+      gasManagerConfig: {
+        policyId: ALCHEMY_GAS_POLICY_ID,
+      },
+    });
+
+    const address = await provider.getAddress();
+    console.log("[aa-provider] Smart Account address:", address);
+
+    return provider;
+  })();
+
+  return clientPromise;
 }
 
-/**
- * Submits a sponsored UserOperation.
- *
- * @param {`0x${string}`} calldata – ABI-encoded calldata (or raw bytes as hex)
- * @returns {{ hash: string, txHash: string|null }}
- */
-export async function submitUserOperation(calldata) {
-  const client = await getClient();
+export async function submitUserOperation(rawPayload) {
+  const provider = await getProvider();
 
-  const target = /** @type {`0x${string}`} */ (
-    process.env.TARGET_CONTRACT_ADDRESS
-  );
-  if (!target || !target.startsWith('0x')) {
-    throw new Error('Missing or invalid TARGET_CONTRACT_ADDRESS in env');
+  const target = process.env.TARGET_CONTRACT_ADDRESS;
+  if (!target || !target.startsWith("0x")) {
+    throw new Error("Missing or invalid TARGET_CONTRACT_ADDRESS in env");
   }
 
-  console.log('[aa-client] sending UserOperation to', target);
+  const record = normalizePayload(rawPayload);
 
-  const { hash: uoHash } = await client.sendUserOperation({
+  const data = encodeFunctionData({
+    abi: JSON_REGISTRY_ABI,
+    functionName: "registerRecord",
+    args: [record],
+  });
+
+  console.log("[aa-provider] sending UserOperation to", target);
+  console.log("[aa-provider] record:", record);
+
+  const result = await provider.sendUserOperation({
     uo: {
       target,
-      data: calldata,   // POST body becomes calldata here
+      data,
       value: 0n,
     },
   });
 
-  console.log('[aa-client] UserOperation hash:', uoHash);
+  console.log("[aa-provider] UserOperation hash:", result.hash);
 
-  // Wait for the UserOp to land in a mined tx
   let txHash = null;
   try {
-    txHash = await client.waitForUserOperationTransaction({ hash: uoHash });
-    console.log('[aa-client] mined tx hash:', txHash);
+    txHash = await provider.waitForUserOperationTransaction({ hash: uoHash });
+    console.log("[aa-provider] mined tx hash:", txHash);
   } catch (waitErr) {
-    // Non-fatal – we already have the uoHash
-    console.warn('[aa-client] waitForUserOperationTransaction failed:', waitErr.message);
+    console.warn("[aa-provider] waitForUserOperationTransaction failed:", waitErr.message);
   }
 
-  return { hash: uoHash, txHash };
+  return {
+    hash: result.hash,
+    txHash,
+    calldata: data,
+    record,
+  };
+}
+
+function normalizePayload(rawPayload) {
+  let parsed;
+
+  try {
+    parsed = typeof rawPayload === "string" ? JSON.parse(rawPayload) : rawPayload;
+  } catch {
+    throw new Error("Invalid JSON payload");
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Payload must be a JSON object");
+  }
+
+  if (!parsed.title || !String(parsed.title).trim()) {
+    throw new Error('Field "title" is required');
+  }
+
+  if (!parsed.body || !String(parsed.body).trim()) {
+    throw new Error('Field "body" is required');
+  }
+
+  const createdAt =
+    parsed.createdAt != null
+      ? BigInt(parsed.createdAt)
+      : BigInt(Math.floor(Date.now() / 1000));
+
+  let externalId = parsed.externalId;
+  if (!externalId) {
+    externalId = keccak256(stringToHex(JSON.stringify(parsed)));
+  }
+
+  if (typeof externalId !== "string" || !/^0x[a-fA-F0-9]{64}$/.test(externalId)) {
+    throw new Error('Field "externalId" must be a valid bytes32 hex string');
+  }
+
+  return {
+    title: String(parsed.title),
+    body: String(parsed.body),
+    category: String(parsed.category ?? ""),
+    createdAt,
+    externalId,
+  };
 }

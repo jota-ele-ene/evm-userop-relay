@@ -1,141 +1,117 @@
 # evm-userop-relay
 
-A minimal **Node.js / Express** API that:
+Node.js API that receives a JSON payload and submits it as an ERC-4337 sponsored UserOperation via Alchemy Gas Manager to a verified contract function:
 
-1. Receives a `POST /relay` request.
-2. Takes the **raw body** (JSON, plain text, or hex) and converts it to EVM calldata.
-3. Submits it as a **sponsored ERC-4337 UserOperation** using the **Alchemy Gas Manager** (gas tank), so end-users pay zero gas.
-
----
-
-## Architecture
-
-```
-POST /relay
-  │
-  ├─ resolveCalldata()   ← converts body → 0x-hex
-  │
-  └─ submitUserOperation()
-        │
-        ├─ createModularAccountAlchemyClient()  ← @alchemy/aa-alchemy
-        │       signer: LocalAccountSigner (EOA private key)
-        │       gasManagerConfig.policyId       ← gas tank / paymaster
-        │
-        └─ client.sendUserOperation({ target, data: calldata, value: 0n })
-              │
-              └─ Alchemy Bundler → EntryPoint (on-chain) → Target contract
+```solidity
+registerRecord((string title,string body,string category,uint256 createdAt,bytes32 externalId))
 ```
 
----
+This layout is meant for Sepolia explorers to decode the input by fields once the target contract is verified.
 
-## Prerequisites
+## Environment
 
-| What | Where |
-|---|---|
-| Alchemy API key | <https://dashboard.alchemy.com> |
-| Gas Manager Policy ID | Dashboard → Gas Manager → New policy |
-| EOA private key (signer) | MetaMask export / `cast wallet new` |
-| Target contract address | Your deployed EVM contract |
+Copy `.env.example` to `.env` and fill in:
 
----
+- `ALCHEMY_API_KEY`
+- `ALCHEMY_GAS_POLICY_ID`
+- `OWNER_PRIVATE_KEY`
+- `TARGET_CONTRACT_ADDRESS`
+- `SEPOLIA_RPC_URL`
+- `ETHERSCAN_API_KEY`
+- `DEPLOYER_PRIVATE_KEY`
+- `NETWORK=sepolia`
+- `PORT=3000`
 
-## Quick Start
+`OWNER_PRIVATE_KEY` is used by the relay API. `DEPLOYER_PRIVATE_KEY` is used by the contract deployment script.
+
+## Install
 
 ```bash
-# 1. Clone
-git clone https://github.com/jota-ele-ene/evm-userop-relay.git
-cd evm-userop-relay
-
-# 2. Install
 npm install
+```
 
-# 3. Configure
-cp .env.example .env
-# Edit .env with your keys
+## Deploy
 
-# 4. Run
-npm start
-# or for dev (auto-reload)
+The repo includes two deployment options:
+
+- `npm run deploy` — deploy using Hardhat and `scripts/deploy.js`
+- `npm run deploy-manual` — deploy directly with Viem using `scripts/deploy-manual.js`
+
+After deployment, update `TARGET_CONTRACT_ADDRESS` in `.env` with the new contract address.
+
+## Verify contract
+
+To verify on Etherscan after deployment, run:
+
+```bash
+npm run verify:sepolia -- <DEPLOYED_CONTRACT_ADDRESS>
+```
+
+For example:
+
+```bash
+npm run verify:sepolia -- 0x1234...abcd
+```
+
+## Run
+
+```bash
 npm run dev
 ```
 
----
+## Routes
 
-## Environment Variables
-
-| Variable | Required | Description |
-|---|---|---|
-| `ALCHEMY_API_KEY` | ✅ | Your Alchemy project API key |
-| `ALCHEMY_GAS_POLICY_ID` | ✅ | Gas Manager policy ID (enables sponsored gas) |
-| `OWNER_PRIVATE_KEY` | ✅ | Private key of the EOA that owns the smart account |
-| `TARGET_CONTRACT_ADDRESS` | ✅ | Contract address that will receive the calldata |
-| `NETWORK` | ✅ | `sepolia` \| `polygon` \| `base` \| `optimism` \| `arbitrum` \| `mainnet` |
-| `PORT` | ❌ | HTTP port (default `3000`) |
-
----
-
-## API
+### `GET /`
+Serves an HTML form with a textarea where you can paste JSON.
 
 ### `POST /relay`
+Accepts either:
+- `application/x-www-form-urlencoded` with field `payload`
+- `application/json` with a JSON object body
+- raw text containing JSON
 
-Sends the request body as calldata inside a **gas-sponsored UserOperation**.
-
-#### Body formats supported
-
-| Content-Type | Behavior |
-|---|---|
-| `application/json` | JSON is `JSON.stringify`-d then hex-encoded as UTF-8 |
-| `text/plain` | String is hex-encoded as UTF-8 |
-| `application/octet-stream` | Raw bytes sent as-is |
-| Any string starting with `0x` | Treated as already-encoded hex calldata |
-
-#### Response `202 Accepted`
+Expected JSON shape:
 
 ```json
 {
-  "status": "submitted",
-  "userOpHash": "0xabc...",
-  "txHash": "0xdef..."   // null if not yet mined when we respond
+  "title": "Acta 0001",
+  "body": "Este es el contenido que quiero registrar",
+  "category": "registro",
+  "createdAt": 1746995760,
+  "externalId": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 }
 ```
 
-#### Example – JSON body
+`title` and `body` are required.
+
+If `createdAt` is omitted, the server sets the current unix timestamp.
+If `externalId` is omitted, the server derives a `bytes32` value from the JSON content.
+
+### Example with curl
 
 ```bash
 curl -X POST http://localhost:3000/relay \
   -H 'Content-Type: application/json' \
-  -d '{"action":"store","value":42}'
+  -d '{
+    "title":"Acta 0001",
+    "body":"Texto de prueba",
+    "category":"registro"
+  }'
 ```
 
-#### Example – raw hex calldata
+## Response
 
-```bash
-curl -X POST http://localhost:3000/relay \
-  -H 'Content-Type: text/plain' \
-  -d '0x60fe47b10000000000000000000000000000000000000000000000000000000000000001'
+```json
+{
+  "status": "submitted",
+  "userOpHash": "0x...",
+  "txHash": "0x...",
+  "explorerUrl": "https://sepolia.etherscan.io/tx/0x..."
+}
 ```
 
-### `GET /health`
+## Notes
 
-Returns `{ "ok": true }` – useful for load-balancer checks.
-
----
-
-## How the Gas Tank Works
-
-The Alchemy **Gas Manager** acts as an ERC-4337 Paymaster:
-
-1. You deposit ETH into your Gas Manager policy in the Alchemy dashboard.
-2. The policy is attached to the `createModularAccountAlchemyClient` client.
-3. When `sendUserOperation` is called, the SDK hits `alchemy_requestGasAndPaymasterAndData`, which returns signed `paymaster + paymasterData`.
-4. The Bundler sends the `UserOperation` to the on-chain `EntryPoint`. The Paymaster contract pays the gas out of your deposited balance.
-5. The end-user pays **zero gas**.
-
----
-
-## Security Notes
-
-- **Never commit `.env`** – it is in `.gitignore`.
-- The `OWNER_PRIVATE_KEY` controls the smart account. Use a **dedicated key** with minimal balance.
-- Add rate-limiting or an API key header to `POST /relay` in production to avoid draining your gas tank.
-- For production, use a secrets manager (AWS Secrets Manager, HashiCorp Vault, etc.) instead of a `.env` file.
+- Gas sponsorship depends on your Alchemy Gas Manager policy.
+- The target contract should be verified in Sepolia Etherscan so its ABI can decode tuple fields.
+- The repo does not deploy the contract; it relays the call to an already deployed contract.

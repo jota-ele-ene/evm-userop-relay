@@ -6,13 +6,37 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "dev": "node --watch src/index.js",
+    "deploy": "npx hardhat run scripts/deploy.js --network sepolia",
+    "deploy-manual": "node scripts/deploy-manual.js",
+    "verify:sepolia": "npx hardhat verify --network sepolia --contract contracts/JsonRegistry.sol:JsonRegistry"
   },
   "dependencies": {
-    "@alchemy/aa-alchemy": "^4.1.0",
-    "@alchemy/aa-core": "^4.1.0",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2",
-    "viem": "^2.13.6"
-  }
+    "@account-kit/infra": "^4.88.2",
+    "@account-kit/smart-contracts": "^4.88.2",
+    "@alchemy/aa-accounts": "^3.19.0",
+    "@alchemy/aa-alchemy": "^3.19.0",
+    "@alchemy/aa-core": "^3.19.0",
+    "alchemy-sdk": "^3.6.5",
+    "ethers": "^6.16.0",
+    "express": "^5.2.1",
+    "viem": "^2.48.11"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-verify": "^3.0.17",
+    "@nomicfoundation/hardhat-viem": "^3.0.7",
+    "dotenv": "^17.4.2",
+    "hardhat": "^3.4.5"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jota-ele-ene/evm-userop-relay.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/jota-ele-ene/evm-userop-relay/issues"
+  },
+  "homepage": "https://github.com/jota-ele-ene/evm-userop-relay#readme"
 }
