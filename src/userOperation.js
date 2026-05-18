@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { createLightAccountAlchemyClient } from "@alchemy/aa-alchemy";
 import { LocalAccountSigner } from "@alchemy/aa-core";
-import { encodeFunctionData, keccak256, stringToHex } from "viem";
+import { encodeFunctionData } from "viem";
 import {
   sepolia,
   polygon,
@@ -24,9 +24,9 @@ const CHAIN_MAP = {
 };
 
 function getChain(network) {
-  const chain = CHAIN_MAP[network];
+  const chain = CHAIN_MAP[String(network || "").trim().toLowerCase()];
   if (!chain) {
-    throw new Error(`Network not supported for ABI lookup: ${network}`);
+    throw new Error(`Network not supported: ${network}`);
   }
   return chain;
 }
@@ -34,15 +34,12 @@ function getChain(network) {
 function getExplorerApiUrl(network) {
   const chain = getChain(network);
   const apiUrl = chain.blockExplorers?.default?.apiUrl;
-  if (apiUrl) {
-    return apiUrl;
+
+  if (!apiUrl) {
+    throw new Error(`Explorer API not available for network: ${network}`);
   }
 
-  const apiHost = EXPLORER_API_HOSTS[network];
-  if (!apiHost) {
-    throw new Error(`Network not supported for ABI lookup: ${network}`);
-  }
-  return `https://${apiHost}/api`;
+  return apiUrl;
 }
 
 function isV2ExplorerApi(apiUrl) {
@@ -79,16 +76,19 @@ async function fetchContractAbi(network, address) {
     throw new Error(data.result || "Unable to fetch contract ABI");
   }
 
-  return JSON.parse(data.result);
+  const abi = typeof data.result === "string" ? JSON.parse(data.result) : data.result;
+
+  if (!Array.isArray(abi)) {
+    throw new Error("Explorer returned an invalid ABI format");
+  }
+
+  return abi;
 }
 
 const providerCache = new Map();
 
 async function getProvider(networkName) {
   const normalizedNetwork = String(networkName || "sepolia").trim().toLowerCase();
-  if (!normalizedNetwork) {
-    throw new Error("Missing network selection");
-  }
 
   if (providerCache.has(normalizedNetwork)) {
     return providerCache.get(normalizedNetwork);
@@ -104,12 +104,7 @@ async function getProvider(networkName) {
   if (!ALCHEMY_GAS_POLICY_ID) throw new Error("Missing ALCHEMY_GAS_POLICY_ID in env");
   if (!OWNER_PRIVATE_KEY) throw new Error("Missing OWNER_PRIVATE_KEY in env");
 
-  const chain = CHAIN_MAP[normalizedNetwork];
-  if (!chain) {
-    throw new Error(
-      `Unsupported network "${networkName}". Choose: ${Object.keys(CHAIN_MAP).join(", ")}`
-    );
-  }
+  const chain = getChain(normalizedNetwork);
 
   const privateKey = OWNER_PRIVATE_KEY.startsWith("0x")
     ? OWNER_PRIVATE_KEY
@@ -126,9 +121,6 @@ async function getProvider(networkName) {
     },
   });
 
-  const address = await provider.getAddress();
-  console.log("[aa-provider] Smart Account address:", address);
-
   providerCache.set(normalizedNetwork, provider);
   return provider;
 }
@@ -142,6 +134,7 @@ export async function submitUserOperation(payload, network) {
   }
 
   const abi = await fetchContractAbi(network, target);
+
   const functionAbi = abi.find(
     (item) =>
       item.type === "function" &&
@@ -154,14 +147,10 @@ export async function submitUserOperation(payload, network) {
   }
 
   const data = encodeFunctionData({
-    abi: functionAbi,
+    abi: [functionAbi],
     functionName: functionAbi.name,
     args: payload.args || [],
   });
-
-  console.log("[aa-provider] sending UserOperation to", target);
-  console.log("[aa-provider] function:", functionAbi.name);
-  console.log("[aa-provider] args:", payload.args);
 
   const result = await provider.sendUserOperation({
     uo: {
@@ -171,12 +160,9 @@ export async function submitUserOperation(payload, network) {
     },
   });
 
-  console.log("[aa-provider] UserOperation hash:", result.hash);
-
   let txHash = null;
   try {
     txHash = await provider.waitForUserOperationTransaction({ hash: result.hash });
-    console.log("[aa-provider] mined tx hash:", txHash);
   } catch (waitErr) {
     console.warn("[aa-provider] waitForUserOperationTransaction failed:", waitErr.message);
   }
@@ -185,50 +171,5 @@ export async function submitUserOperation(payload, network) {
     hash: result.hash,
     txHash,
     calldata: data,
-    record,
-  };
-}
-
-function normalizePayload(rawPayload) {
-  let parsed;
-
-  try {
-    parsed = typeof rawPayload === "string" ? JSON.parse(rawPayload) : rawPayload;
-  } catch {
-    throw new Error("Invalid JSON payload");
-  }
-
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("Payload must be a JSON object");
-  }
-
-  if (!parsed.title || !String(parsed.title).trim()) {
-    throw new Error('Field "title" is required');
-  }
-
-  if (!parsed.body || !String(parsed.body).trim()) {
-    throw new Error('Field "body" is required');
-  }
-
-  const createdAt =
-    parsed.createdAt != null
-      ? BigInt(parsed.createdAt)
-      : BigInt(Math.floor(Date.now() / 1000));
-
-  let externalId = parsed.externalId;
-  if (!externalId) {
-    externalId = keccak256(stringToHex(JSON.stringify(parsed)));
-  }
-
-  if (typeof externalId !== "string" || !/^0x[a-fA-F0-9]{64}$/.test(externalId)) {
-    throw new Error('Field "externalId" must be a valid bytes32 hex string');
-  }
-
-  return {
-    title: String(parsed.title),
-    body: String(parsed.body),
-    category: String(parsed.category ?? ""),
-    createdAt,
-    externalId,
   };
 }

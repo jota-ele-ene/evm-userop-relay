@@ -8,42 +8,33 @@ registerRecord((string title,string body,string category,uint256 createdAt,bytes
 
 The backend serves a static frontend from `front/` and exposes a REST endpoint for submitting the payload.
 
-## Environment
+## Configuration
 
-Copy `.env.example` to `.env` and fill in your values.
-
-Required global values:
+Configure the relay using environment variables or CI secrets (the service reads configuration from the process environment at runtime). Required variables used by the relay and supporting scripts:
 
 - `ALCHEMY_API_KEY`
 - `ALCHEMY_GAS_POLICY_ID`
-- `OWNER_PRIVATE_KEY`
-- `TARGET_CONTRACT_ADDRESS`
-- `ETHERSCAN_API_KEY`
-- `PORT`
+- `OWNER_PRIVATE_KEY` (private key used by the relayer signer)
+- `TARGET_CONTRACT_ADDRESS` (optional default contract address; can be overridden per-request)
+- `ETHERSCAN_API_KEY` (used to fetch ABIs from explorers)
+- `PORT` (optional, defaults to `3000`)
 
-The relay selects the active network from the frontend dropdown. Supported networks are provided by `@account-kit/infra` and exposed via the backend `/api/networks` endpoint.
+RPC and explorer configuration for deployment scripts may be provided as network-scoped variables (for example `SEPOLIA_RPC_URL`, `SEPOLIA_PRIVATE_KEY`). Provide these via your CI/host secret manager when deploying.
 
-The relay uses a single `ALCHEMY_API_KEY` and `ALCHEMY_GAS_POLICY_ID` for all supported chains. Explorer URLs can be configured via `EXPLORER_BASE_URL` or network-specific environment variables if needed.
+The relay selects the active network from the frontend or request payload. Supported networks are provided by the `@account-kit/infra` SDK and exposed via the backend `GET /api/networks` endpoint.
 
-Example for Sepolia:
+Supported network IDs (keys exposed by the API):
 
-```env
-ALCHEMY_API_KEY=your_alchemy_api_key_here
-ALCHEMY_GAS_POLICY_ID=your_policy_id_here
-EXPLORER_BASE_URL=https://sepolia.etherscan.io/tx/
-OWNER_PRIVATE_KEY=your_owner_private_key_here
-TARGET_CONTRACT_ADDRESS=0xYourTargetContractAddress
-```
+- `ethereum` (alias for `mainnet`)
+- `sepolia`
+- `polygon`
+- `amoy` (alias for Polygon Amoy)
+- `base`
+- `optimism`
+- `arbitrum`
+- `mainnet`
 
-Example for Polygon:
-
-```env
-POLYGON_RPC_URL=https://polygon-mainnet.g.alchemy.com/v2/your_alchemy_api_key_here
-POLYGON_EXPLORER_BASE_URL=https://polygonscan.com/tx/
-POLYGON_PRIVATE_KEY=your_polygon_private_key_here
-```
-
-Deployment scripts still read network-specific RPC and key values from `.env`, but the relay itself no longer uses a global `NETWORK` env variable.
+These correspond to the chain objects exported by `@account-kit/infra` and include `rpcUrls`, `blockExplorers`, `name`, and `id` metadata returned by `GET /api/networks`.
 
 ## Install
 
@@ -63,40 +54,39 @@ Then open `http://localhost:3000` in your browser.
 
 ## Deployment
 
-The project supports deploy + verify using `scripts/deploy.js`.
+The project supports deploy + verify using `scripts/deploy.js`. You have to compile your smart contract before.
+
+If you have to compile:
 
 ```bash
-node scripts/deploy.js --network sepolia --contract JsonRegistry --contract-path contracts/JsonRegistry.sol
+npx hardhat compile
 ```
 
-If you want to skip verification:
+Once you got the artifacts for your contract at `/artifacts/contracts`, you can deploy it:
 
 ```bash
-node scripts/deploy.js --network sepolia --contract JsonRegistry --contract-path contracts/JsonRegistry.sol --no-verify
+node scripts/deploy.js deploy --network sepolia --contract JsonRegistry 
 ```
-
-The script reads RPC and private key values from `.env`, for example `SEPOLIA_RPC_URL` and `SEPOLIA_PRIVATE_KEY`.
 
 ## Verify contract
 
-After deployment the script will automatically call Hardhat verify for the selected network using:
+If you want to verify:
 
 ```bash
-npx hardhat verify --network sepolia --contract contracts/JsonRegistry.sol:JsonRegistry <ADDRESS>
+node scripts/deploy.js verify --network sepolia --address 0x......
 ```
 
-## Frontend
+## API Endpoints
 
-The static UI is served from `front/index.html` and submits payloads to:
+The backend exposes these endpoints:
 
-- `POST /api/submit`
+- `GET /api/networks` — lists supported networks and their RPC/explorer URLs.
+- `GET /api/contract-abi?address=<address>&network=<id>` — fetches contract ABI from the selected network explorer and returns non-view functions.
+- `POST /api/validate-input-json/:network/:contractAddress/:functionSignature` — validates and normalizes a JSON body to match a function's tuple input and returns `calldata` and normalized args.
+- `POST /api/submit-json/:network/:contractAddress/:functionSignature` — validates a JSON body, encodes calldata and submits an ERC-4337 UserOperation using the relayer.
+- `POST /api/submit` — accepts `{ contractAddress, functionSignature, args, network }` and submits a UserOperation (expects `args` already encoded as JS values matching the ABI).
 
-The frontend exposes fields for:
-
-- `network` (selected from the supported networks provided by `@account-kit/infra`)
-- `title`
-- `body`
-- `category`
+The static UI is served from `front/index.html`. The frontend fields include `network`, `title`, `body`, and `category` when using the provided UI.
 
 ## Payload format
 
@@ -122,17 +112,31 @@ If `externalId` is omitted, it is derived from the JSON payload.
 
 ## Example with curl
 
+Submit using `POST /api/submit` with pre-encoded `args`:
+
 ```bash
 curl -X POST http://localhost:3000/api/submit \
   -H 'Content-Type: application/json' \
   -d '{
     "network": "sepolia",
-    "payload": {
+    "contractAddress": "0xYourTargetContractAddress",
+    "functionSignature": "registerRecord((string,string,string,uint256,bytes32))",
+    "args": [{
       "title": "Acta 0001",
       "body": "Texto de prueba",
-      "category": "registro"
-    }
+      "category": "registro",
+      "createdAt": 1680000000,
+      "externalId": "0x0123..."
+    }]
   }'
+```
+
+Or validate JSON and obtain calldata before submitting:
+
+```bash
+curl -X POST http://localhost:3000/api/validate-input-json/sepolia/0xYourTargetContractAddress/registerRecord((string,string,string,uint256,bytes32)) \
+  -H 'Content-Type: application/json' \
+  -d '{ "title":"Acta 0001","body":"Texto","category":"registro","createdAt":1680000000,"externalId":"0x0123..." }'
 ```
 
 ## Response

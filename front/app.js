@@ -5,7 +5,9 @@ const functionSelect = document.querySelector("#functionSelect");
 const functionFields = document.querySelector("#functionFields");
 const networkSelect = document.querySelector("#network");
 const abiStatus = document.querySelector("#abiStatus");
-const submitButton = document.querySelector("#submitButton");
+const tupleJsonField = document.querySelector("#tupleJson");
+const validateJsonButton = document.querySelector("#validateJsonButton");
+const submitJsonButton = document.querySelector("#submitJsonButton");
 
 let availableFunctions = [];
 
@@ -27,8 +29,9 @@ function setAbiStatus(message, isError = false) {
   abiStatus.style.color = isError ? "#b00020" : "#555";
 }
 
-function setSubmitEnabled(enabled) {
-  submitButton.disabled = !enabled;
+function setActionButtonsEnabled(enabled) {
+  validateJsonButton.disabled = !enabled;
+  submitJsonButton.disabled = !enabled;
 }
 
 function clearFunctionInputs() {
@@ -36,47 +39,29 @@ function clearFunctionInputs() {
   functionSelect.innerHTML =
     '<option value="" disabled selected>Introduce dirección y red</option>';
   functionSelect.disabled = true;
-  setSubmitEnabled(false);
+  setActionButtonsEnabled(false);
 }
 
 function renderFunctionInputs(inputs) {
   if (!inputs || inputs.length === 0) {
     functionFields.innerHTML =
       "<p class='hint'>Esta función no tiene parámetros de entrada.</p>";
-    setSubmitEnabled(true);
+    setActionButtonsEnabled(true);
     return;
   }
 
   functionFields.innerHTML = inputs
     .map((input, index) => {
-      const fieldId = `arg_${index}`;
       const label = input.name || `arg${index}`;
-      const needsTextarea =
-        input.type.includes("tuple") || input.type.includes("[");
-
-      if (needsTextarea) {
-        return `
-          <label for="${fieldId}">${escapeHtml(label)} (${escapeHtml(
-          input.type
-        )})</label>
-          <textarea id="${fieldId}" name="${fieldId}" rows="3" placeholder='JSON para ${escapeHtml(
-          input.type
-        )}' required></textarea>
-        `;
-      }
-
       return `
-        <label for="${fieldId}">${escapeHtml(label)} (${escapeHtml(
-        input.type
-      )})</label>
-        <input id="${fieldId}" name="${fieldId}" type="text" placeholder="${escapeHtml(
-        input.type
-      )}" required />
+        <div class="hint">
+          <strong>${escapeHtml(label)}</strong> (${escapeHtml(input.type)})
+        </div>
       `;
     })
     .join("");
 
-  setSubmitEnabled(true);
+  setActionButtonsEnabled(true);
 }
 
 function renderFunctionOptions(functions) {
@@ -88,59 +73,144 @@ function renderFunctionOptions(functions) {
         )}</option>`
     )
     .join("");
+
   functionSelect.disabled = false;
-  // Pintar automáticamente los campos de la primera función seleccionada
   handleFunctionSelect();
 }
 
+function getBaseType(type) {
+  return String(type || "").replace(/\[[^\]]*\]/g, "");
+}
+
+function getArrayDepth(type) {
+  const matches = String(type || "").match(/\[[^\]]*\]/g);
+  return matches ? matches.length : 0;
+}
+
+function getExampleValue(input, depth = 0) {
+  const type = input?.type || "";
+  const baseType = getBaseType(type);
+  const arrayDepth = getArrayDepth(type);
+
+  if (arrayDepth > depth) {
+    return [
+      getExampleValue(
+        { ...input, type: type.replace(/\[[^\]]*\]/, "") },
+        depth + 1
+      ),
+    ];
+  }
+
+  if (baseType === "tuple") {
+    const components = input.components || [];
+    return Object.fromEntries(
+      components.map((component, index) => [
+        component.name || `field${index}`,
+        getExampleValue(component),
+      ])
+    );
+  }
+
+  if (baseType === "address") return "0x0000000000000000000000000000000000000000";
+  if (baseType === "bool") return true;
+  if (baseType === "string") return "";
+  if (baseType === "bytes") return "0x";
+  if (/^bytes\d+$/.test(baseType)) {
+    const size = Number(baseType.replace("bytes", ""));
+    return `0x${"00".repeat(size)}`;
+  }
+  if (baseType.startsWith("uint") || baseType.startsWith("int")) return "0";
+
+  return "";
+}
+
+function getTuplePlaceholder(input) {
+  return JSON.stringify(getExampleValue(input), null, 2);
+}
+
+function renderInputHelp(input) {
+  if (!input.type.includes("tuple")) {
+    return "";
+  }
+
+  const components = input.components || [];
+  const fields = components.length
+    ? components
+        .map((component, index) => {
+          const name = escapeHtml(component.name || `field${index}`);
+          const type = escapeHtml(component.type || "unknown");
+          return `<li><code>${name}</code>: ${type}</li>`;
+        })
+        .join("")
+    : "<li>Sin metadatos de components en el ABI.</li>";
+
+  return `
+    <div class="hint tuple-help">
+      <p>Rellena el textarea inferior como JSON válido.</p>
+      <ul>${fields}</ul>
+    </div>
+  `;
+}
+
 function getSelectedFunction() {
-  return availableFunctions.find(
-    (fn) => fn.signature === functionSelect.value
+  return availableFunctions.find((fn) => fn.signature === functionSelect.value);
+}
+
+function selectedFunctionSupportsJsonFlow(fn) {
+  if (!fn) return false;
+  const inputs = fn.inputs || [];
+
+  return (
+    inputs.length === 0 ||
+    (inputs.length === 1 &&
+      (inputs[0].type === "tuple" || inputs[0].type.startsWith("tuple[")))
   );
 }
 
-function parseArgValue(type, rawValue) {
-  if (!rawValue) {
-    throw new Error("Todos los campos del ABI son obligatorios.");
+function updateTupleJsonForSelectedFunction(fn) {
+  if (!fn) {
+    tupleJsonField.value = "";
+    return;
   }
 
-  if (type === "bool") {
-    return rawValue.toLowerCase() === "true";
+  const inputs = fn.inputs || [];
+
+  if (inputs.length === 0) {
+    tupleJsonField.value = "{}";
+    return;
   }
 
-  if (type.startsWith("uint") || type.startsWith("int")) {
-    return rawValue;
+  if (inputs.length === 1 && (inputs[0].type === "tuple" || inputs[0].type.startsWith("tuple["))) {
+    tupleJsonField.value = getTuplePlaceholder(inputs[0]);
+    return;
   }
 
-  if (type === "address") {
-    return rawValue;
-  }
-
-  if (type.startsWith("bytes") || type === "string") {
-    return rawValue;
-  }
-
-  if (type.includes("tuple") || type.includes("[")) {
-    try {
-      return JSON.parse(rawValue);
-    } catch {
-      throw new Error(`JSON inválido para tipo ${type}`);
-    }
-  }
-
-  return rawValue;
+  tupleJsonField.value = "";
 }
 
-function getFunctionArgs(inputs) {
-  return inputs.map((input, index) => {
-    const value = document.querySelector(`#arg_${index}`).value.trim();
-    return parseArgValue(input.type, value);
-  });
+function buildJsonEndpoint(action) {
+  const network = encodeURIComponent(networkSelect.value);
+  const contractAddress = encodeURIComponent(contractAddressInput.value.trim());
+  const functionSignature = encodeURIComponent(functionSelect.value);
+
+  return `api/${action}/${network}/${contractAddress}/${functionSignature}`;
 }
 
-async function submitPayload(event) {
-  event.preventDefault();
+function getTupleJsonBody() {
+  const raw = tupleJsonField.value.trim();
 
+  if (!raw) {
+    throw new Error("El campo Input JSON está vacío.");
+  }
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error("El campo Input JSON no contiene un JSON válido.");
+  }
+}
+
+async function postJsonAction(action) {
   const contractAddress = contractAddressInput.value.trim();
   const network = networkSelect.value;
   const selectedFunction = getSelectedFunction();
@@ -151,7 +221,7 @@ async function submitPayload(event) {
   }
 
   if (!network) {
-    renderResponse("<p>Selecciona una red antes de enviar.</p>");
+    renderResponse("<p>Selecciona una red antes de continuar.</p>");
     return;
   }
 
@@ -160,42 +230,102 @@ async function submitPayload(event) {
     return;
   }
 
-  let args;
+  if (!selectedFunctionSupportsJsonFlow(selectedFunction)) {
+    renderResponse(
+      "<p>Esta función no es compatible con el flujo JSON. Debe tener cero parámetros o un único parámetro tuple / tuple[].</p>"
+    );
+    return;
+  }
+
+  let body;
   try {
-    args = getFunctionArgs(selectedFunction.inputs);
+    body = getTupleJsonBody();
   } catch (error) {
     renderResponse(`<p>${escapeHtml(error.message)}</p>`);
     return;
   }
 
-  renderResponse("<p>Enviando UserOperation...</p>");
+  const loadingText =
+    action === "validate-input-json"
+      ? "<p>Validando JSON...</p>"
+      : "<p>Enviando UserOperation...</p>";
+
+  renderResponse(loadingText);
+
+  validateJsonButton.disabled = true;
+  submitJsonButton.disabled = true;
 
   try {
-    const response = await fetch("api/submit", {
+    const response = await fetch(buildJsonEndpoint(action), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contractAddress,
-        network,
-        functionSignature: selectedFunction.signature,
-        args,
-      }),
+      body: JSON.stringify(body),
     });
 
     const data = await response.json();
+
     if (!response.ok) {
       throw new Error(data.message || "Error inesperado");
     }
 
-    const explorerBaseUrl = data.explorerBaseUrl || "";
+    if (action === "validate-input-json") {
+      renderResponse(`
+        <h2>JSON válido</h2>
+        <p><strong>Función:</strong> ${escapeHtml(data.function?.name || "")}</p>
+        <p><strong>Contrato:</strong> ${escapeHtml(contractAddress)}</p>
+        <h3>Args normalizados</h3>
+        <pre>${escapeHtml(JSON.stringify(data.normalizedArgs, null, 2))}</pre>
+        <h3>Calldata</h3>
+        <pre>${escapeHtml(data.calldata || "")}</pre>
+      `);
+      return;
+    }
+
+    const userOpUrl = data.explorer?.userOpUrl;
+    const txUrl = data.explorer?.txUrl;
+    const contractUrl = data.explorer?.contractUrl;
+
     renderResponse(`
       <h2>UserOperation enviada</h2>
-      <p><strong>UO Hash:</strong> <a href="${escapeHtml(
-        explorerBaseUrl + data.result.hash
-      )}" target="_blank">${escapeHtml(data.result.hash)}</a></p>
-      <p><strong>Tx Hash:</strong> <a href="${escapeHtml(
-        explorerBaseUrl + data.result.txHash
-      )}" target="_blank">${escapeHtml(data.result.txHash)}</a></p>
+
+      <p>
+        <strong>UO Hash:</strong>
+        ${
+          data.result?.hash
+            ? (
+                userOpUrl
+                  ? `<a href="${escapeHtml(userOpUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(data.result.hash)}</a>`
+                  : escapeHtml(data.result.hash)
+              )
+            : "N/D"
+        }
+      </p>
+
+      <p>
+        <strong>Tx Hash:</strong>
+        ${
+          data.result?.txHash
+            ? (
+                txUrl
+                  ? `<a href="${escapeHtml(txUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(data.result.txHash)}</a>`
+                  : escapeHtml(data.result.txHash)
+              )
+            : "Pendiente"
+        }
+      </p>
+
+      <p>
+        <strong>Contrato:</strong>
+        ${
+          contractUrl
+            ? `<a href="${escapeHtml(contractUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(contractAddress)}</a>`
+            : escapeHtml(contractAddress)
+        }
+      </p>
+
+      <h3>Validación</h3>
+      <pre>${escapeHtml(JSON.stringify(data.validation, null, 2))}</pre>
+
       <h3>Resultado</h3>
       <pre>${escapeHtml(JSON.stringify(data.result, null, 2))}</pre>
     `);
@@ -204,6 +334,8 @@ async function submitPayload(event) {
       <h2>Error</h2>
       <pre>${escapeHtml(error.message)}</pre>
     `);
+  } finally {
+    setActionButtonsEnabled(true);
   }
 }
 
@@ -230,14 +362,15 @@ async function loadNetworks() {
       throw new Error(data.message || "No se pudo cargar la lista de redes.");
     }
 
-    networkSelect.innerHTML = data.networks
-      .map(
+    networkSelect.innerHTML = [
+      '<option value="" disabled selected>Selecciona una red</option>',
+      ...data.networks.map(
         (network) =>
           `<option value="${escapeHtml(network.id)}">${escapeHtml(
             `${network.id} (${network.chainId})`
           )}</option>`
-      )
-      .join("");
+      ),
+    ].join("");
   } catch (error) {
     renderResponse(`<p>Error cargando redes: ${escapeHtml(error.message)}</p>`);
   }
@@ -248,6 +381,7 @@ async function loadContractAbi() {
   const network = networkSelect.value;
 
   clearFunctionInputs();
+  tupleJsonField.value = "";
 
   if (!contractAddress || !network) {
     setAbiStatus(
@@ -284,7 +418,7 @@ async function loadContractAbi() {
     }
 
     renderFunctionOptions(availableFunctions);
-    setAbiStatus("ABI cargado. Selecciona la función para ver los campos.");
+    setAbiStatus("ABI cargado. Selecciona la función para revisar o editar el JSON.");
   } catch (error) {
     setAbiStatus(error.message, true);
     renderResponse(`<p>Error cargando ABI: ${escapeHtml(error.message)}</p>`);
@@ -293,17 +427,57 @@ async function loadContractAbi() {
 
 function handleFunctionSelect() {
   const selectedFunction = getSelectedFunction();
+
   if (!selectedFunction) {
     clearFunctionInputs();
+    tupleJsonField.value = "";
     return;
   }
 
   renderFunctionInputs(selectedFunction.inputs);
+
+  const supportsJson = selectedFunctionSupportsJsonFlow(selectedFunction);
+
+  if (!supportsJson) {
+    functionFields.innerHTML += `
+      <div class="hint tuple-help">
+        <p>Esta función no entra en el flujo JSON simplificado.</p>
+        <ul>
+          <li>Debe tener cero parámetros, o un único parámetro <code>tuple</code> o <code>tuple[]</code>.</li>
+        </ul>
+      </div>
+    `;
+    tupleJsonField.value = "";
+    setActionButtonsEnabled(false);
+    return;
+  }
+
+  if (
+    selectedFunction.inputs?.length === 1 &&
+    selectedFunction.inputs[0].type.includes("tuple")
+  ) {
+    functionFields.innerHTML += renderInputHelp(selectedFunction.inputs[0]);
+  }
+
+  updateTupleJsonForSelectedFunction(selectedFunction);
+  setActionButtonsEnabled(true);
 }
 
-form.addEventListener("submit", submitPayload);
+form.addEventListener("submit", (event) => {
+  event.preventDefault();
+});
+
 contractAddressInput.addEventListener("blur", loadContractAbi);
 networkSelect.addEventListener("change", loadContractAbi);
 functionSelect.addEventListener("change", handleFunctionSelect);
 
+validateJsonButton.addEventListener("click", () => {
+  postJsonAction("validate-input-json");
+});
+
+submitJsonButton.addEventListener("click", () => {
+  postJsonAction("submit-json");
+});
+
+setActionButtonsEnabled(false);
 loadNetworks();

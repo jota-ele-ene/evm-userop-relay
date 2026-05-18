@@ -27,6 +27,11 @@
       padding: 10px 16px;
       cursor: pointer;
     }
+    .actions {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
     .hint {
       color: #555;
       font-size: 14px;
@@ -41,12 +46,35 @@
     #response {
       margin-top: 24px;
     }
+    .tuple-help {
+      margin-top: -4px;
+      margin-bottom: 4px;
+      padding: 10px 12px;
+      background: #f8f8f8;
+      border-radius: 8px;
+    }
+
+    .tuple-help p {
+      margin: 0 0 8px;
+    }
+
+    .tuple-help ul {
+      margin: 0;
+      padding-left: 20px;
+    }
+
+    code {
+      font-family: monospace;
+      background: #f2f2f2;
+      padding: 1px 4px;
+      border-radius: 4px;
+    }
   </style>
 </head>
 <body>
   <h1>Registrar JSON vía Account Abstraction</h1>
   <p class="hint">
-    Rellena los campos del JSON. <strong>title</strong> y <strong>body</strong> son obligatorios.
+    Selecciona red, contrato y función. Después edita el JSON del tuple, valídalo y envíalo.
   </p>
 
   <form id="payloadForm">
@@ -63,10 +91,34 @@
       <option value="" disabled selected>Introduce dirección y red</option>
     </select>
 
-    <div id="abiStatus" class="hint">Selecciona una red e introduce la dirección del contrato para cargar el ABI automáticamente.</div>
+    <div id="abiStatus" class="hint">
+      Selecciona una red e introduce la dirección del contrato para cargar el ABI automáticamente.
+    </div>
+
     <div id="functionFields"></div>
 
-    <button type="submit" id="submitButton" disabled>Enviar UserOperation</button>
+    <label for="tupleJson">Input JSON</label>
+    <textarea
+      id="tupleJson"
+      name="tupleJson"
+      placeholder='{
+  "title": "Ejemplo",
+  "body": "Contenido",
+  "externalId": "0x0000000000000000000000000000000000000000000000000000000000000000"
+}'></textarea>
+
+    <div class="tuple-help">
+      <p>Para las funciones con un único parámetro <code>tuple</code> o <code>tuple[]</code>, pega aquí el JSON completo que quieras validar o enviar.</p>
+      <ul>
+        <li>El botón <strong>Validar JSON</strong> comprueba el ABI y genera el calldata sin enviar la operación.</li>
+        <li>El botón <strong>Enviar UserOperation</strong> usa ese mismo JSON para enviar la operación real.</li>
+      </ul>
+    </div>
+
+    <div class="actions">
+      <button type="button" id="validateJsonButton">Validar JSON</button>
+      <button type="button" id="submitJsonButton">Enviar UserOperation</button>
+    </div>
   </form>
 
   <div id="response"></div>

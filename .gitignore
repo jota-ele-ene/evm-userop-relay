@@ -6,3 +6,5 @@ coverage
 ignition
 *.log
 types/
+contracts/*
+!contracts/JsonRegistry.sol
