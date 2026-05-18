@@ -75,6 +75,8 @@ function renderFunctionInputs(inputs) {
       `;
     })
     .join("");
+
+  setSubmitEnabled(true);
 }
 
 function renderFunctionOptions(functions) {
@@ -87,7 +89,8 @@ function renderFunctionOptions(functions) {
     )
     .join("");
   functionSelect.disabled = false;
-  setSubmitEnabled(false);
+  // Pintar automáticamente los campos de la primera función seleccionada
+  handleFunctionSelect();
 }
 
 function getSelectedFunction() {
