@@ -1,28 +1,49 @@
 # evm-userop-relay
 
-Node.js API that receives a JSON payload and submits it as an ERC-4337 sponsored UserOperation via Alchemy Gas Manager to a verified contract function:
+Node.js API that receives structured JSON payloads and submits them as an ERC-4337 sponsored UserOperation via Alchemy Gas Manager to a contract function:
 
 ```solidity
 registerRecord((string title,string body,string category,uint256 createdAt,bytes32 externalId))
 ```
 
-This layout is meant for Sepolia explorers to decode the input by fields once the target contract is verified.
+The backend serves a static frontend from `front/` and exposes a REST endpoint for submitting the payload.
 
 ## Environment
 
-Copy `.env.example` to `.env` and fill in:
+Copy `.env.example` to `.env` and fill in your values.
+
+Required global values:
 
 - `ALCHEMY_API_KEY`
 - `ALCHEMY_GAS_POLICY_ID`
 - `OWNER_PRIVATE_KEY`
 - `TARGET_CONTRACT_ADDRESS`
-- `SEPOLIA_RPC_URL`
 - `ETHERSCAN_API_KEY`
-- `DEPLOYER_PRIVATE_KEY`
-- `NETWORK=sepolia`
-- `PORT=3000`
+- `PORT`
 
-`OWNER_PRIVATE_KEY` is used by the relay API. `DEPLOYER_PRIVATE_KEY` is used by the contract deployment script.
+The relay selects the active network from the frontend dropdown. Supported networks are provided by `@account-kit/infra` and exposed via the backend `/api/networks` endpoint.
+
+The relay uses a single `ALCHEMY_API_KEY` and `ALCHEMY_GAS_POLICY_ID` for all supported chains. Explorer URLs can be configured via `EXPLORER_BASE_URL` or network-specific environment variables if needed.
+
+Example for Sepolia:
+
+```env
+ALCHEMY_API_KEY=your_alchemy_api_key_here
+ALCHEMY_GAS_POLICY_ID=your_policy_id_here
+EXPLORER_BASE_URL=https://sepolia.etherscan.io/tx/
+OWNER_PRIVATE_KEY=your_owner_private_key_here
+TARGET_CONTRACT_ADDRESS=0xYourTargetContractAddress
+```
+
+Example for Polygon:
+
+```env
+POLYGON_RPC_URL=https://polygon-mainnet.g.alchemy.com/v2/your_alchemy_api_key_here
+POLYGON_EXPLORER_BASE_URL=https://polygonscan.com/tx/
+POLYGON_PRIVATE_KEY=your_polygon_private_key_here
+```
+
+Deployment scripts still read network-specific RPC and key values from `.env`, but the relay itself no longer uses a global `NETWORK` env variable.
 
 ## Install
 
@@ -30,88 +51,115 @@ Copy `.env.example` to `.env` and fill in:
 npm install
 ```
 
-## Deploy
+## Run
 
-The repo includes two deployment options:
+Start the backend and serve the static frontend:
 
-- `npm run deploy` — deploy using Hardhat and `scripts/deploy.js`
-- `npm run deploy-manual` — deploy directly with Viem using `scripts/deploy-manual.js`
+```bash
+node src/index.js
+```
 
-After deployment, update `TARGET_CONTRACT_ADDRESS` in `.env` with the new contract address.
+Then open `http://localhost:3000` in your browser.
+
+## Deployment
+
+The project supports deploy + verify using `scripts/deploy.js`.
+
+```bash
+node scripts/deploy.js --network sepolia --contract JsonRegistry --contract-path contracts/JsonRegistry.sol
+```
+
+If you want to skip verification:
+
+```bash
+node scripts/deploy.js --network sepolia --contract JsonRegistry --contract-path contracts/JsonRegistry.sol --no-verify
+```
+
+The script reads RPC and private key values from `.env`, for example `SEPOLIA_RPC_URL` and `SEPOLIA_PRIVATE_KEY`.
 
 ## Verify contract
 
-To verify on Etherscan after deployment, run:
+After deployment the script will automatically call Hardhat verify for the selected network using:
 
 ```bash
-npm run verify:sepolia -- <DEPLOYED_CONTRACT_ADDRESS>
+npx hardhat verify --network sepolia --contract contracts/JsonRegistry.sol:JsonRegistry <ADDRESS>
 ```
 
-For example:
+## Frontend
 
-```bash
-npm run verify:sepolia -- 0x1234...abcd
-```
+The static UI is served from `front/index.html` and submits payloads to:
 
-## Run
+- `POST /api/submit`
 
-```bash
-npm run dev
-```
+The frontend exposes fields for:
 
-## Routes
+- `network` (selected from the supported networks provided by `@account-kit/infra`)
+- `title`
+- `body`
+- `category`
 
-### `GET /`
-Serves an HTML form with a textarea where you can paste JSON.
+## Payload format
 
-### `POST /relay`
-Accepts either:
-- `application/x-www-form-urlencoded` with field `payload`
-- `application/json` with a JSON object body
-- raw text containing JSON
-
-Expected JSON shape:
+The API expects a JSON object with at least:
 
 ```json
 {
   "title": "Acta 0001",
   "body": "Este es el contenido que quiero registrar",
-  "category": "registro",
-  "createdAt": 1746995760,
-  "externalId": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  "category": "registro"
 }
 ```
 
-`title` and `body` are required.
+Both `title` and `body` are required.
 
-If `createdAt` is omitted, the server sets the current unix timestamp.
-If `externalId` is omitted, the server derives a `bytes32` value from the JSON content.
+Optional fields:
 
-### Example with curl
+- `createdAt` (unix timestamp)
+- `externalId` (bytes32 hex string)
+
+If `createdAt` is omitted, the server sets the current timestamp.
+If `externalId` is omitted, it is derived from the JSON payload.
+
+## Example with curl
 
 ```bash
-curl -X POST http://localhost:3000/relay \
+curl -X POST http://localhost:3000/api/submit \
   -H 'Content-Type: application/json' \
   -d '{
-    "title":"Acta 0001",
-    "body":"Texto de prueba",
-    "category":"registro"
+    "network": "sepolia",
+    "payload": {
+      "title": "Acta 0001",
+      "body": "Texto de prueba",
+      "category": "registro"
+    }
   }'
 ```
 
 ## Response
 
+The API returns JSON with the submission result:
+
 ```json
 {
-  "status": "submitted",
-  "userOpHash": "0x...",
-  "txHash": "0x...",
-  "explorerUrl": "https://sepolia.etherscan.io/tx/0x..."
+  "status": "ok",
+  "result": {
+    "hash": "0x...",
+    "txHash": "0x...",
+    "calldata": "0x...",
+    "record": {
+      "title": "Acta 0001",
+      "body": "Texto de prueba",
+      "category": "registro",
+      "createdAt": "...",
+      "externalId": "0x..."
+    }
+  },
+  "explorerBaseUrl": "https://sepolia.etherscan.io/tx/"
 }
 ```
 
 ## Notes
 
 - Gas sponsorship depends on your Alchemy Gas Manager policy.
-- The target contract should be verified in Sepolia Etherscan so its ABI can decode tuple fields.
-- The repo does not deploy the contract; it relays the call to an already deployed contract.
+- Make sure the target contract is deployed and verified on the selected network.
+- The backend relays the call to the configured contract address rather than deploying the contract itself.

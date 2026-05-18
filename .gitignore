@@ -2,5 +2,7 @@ node_modules
 .env
 artifacts
 cache
+coverage
 ignition
 *.log
+types/
