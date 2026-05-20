@@ -27,6 +27,14 @@
       padding: 10px 16px;
       cursor: pointer;
     }
+    #submitMode {
+      padding: 8px 10px;
+      font-size: 14px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      background: #fff;
+      cursor: pointer;
+    }
     .actions {
       display: flex;
       gap: 12px;
@@ -115,9 +123,15 @@
       </ul>
     </div>
 
+    <label for="submitMode">Modo de envío</label>
+    <select id="submitMode" name="submitMode">
+      <option value="userop" selected>User Operation (ERC-4337 / Account Abstraction)</option>
+      <option value="direct">Transacción directa (EOA)</option>
+    </select>
+
     <div class="actions">
       <button type="button" id="validateJsonButton">Validar JSON</button>
-      <button type="button" id="submitJsonButton">Enviar UserOperation</button>
+      <button type="button" id="submitJsonButton">Enviar</button>
     </div>
   </form>
 

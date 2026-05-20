@@ -1,88 +1,13 @@
 import "dotenv/config";
 import { createLightAccountAlchemyClient } from "@alchemy/aa-alchemy";
 import { LocalAccountSigner } from "@alchemy/aa-core";
-import { encodeFunctionData } from "viem";
 import {
-  sepolia,
-  polygon,
-  polygonAmoy,
-  base,
-  optimism,
-  arbitrum,
-  mainnet,
-} from "@account-kit/infra";
-
-const CHAIN_MAP = {
-  ethereum: mainnet,
-  sepolia,
-  polygon,
-  amoy: polygonAmoy,
-  base,
-  optimism,
-  arbitrum,
-  mainnet,
-};
-
-function getChain(network) {
-  const chain = CHAIN_MAP[String(network || "").trim().toLowerCase()];
-  if (!chain) {
-    throw new Error(`Network not supported: ${network}`);
-  }
-  return chain;
-}
-
-function getExplorerApiUrl(network) {
-  const chain = getChain(network);
-  const apiUrl = chain.blockExplorers?.default?.apiUrl;
-
-  if (!apiUrl) {
-    throw new Error(`Explorer API not available for network: ${network}`);
-  }
-
-  return apiUrl;
-}
-
-function isV2ExplorerApi(apiUrl) {
-  return apiUrl.includes("/v2/") || apiUrl.includes("etherscan.io/v2");
-}
+  NETWORKS,
+  getChain,
+} from "./chains.js";
 
 function isAddress(value) {
   return /^0x[a-fA-F0-9]{40}$/.test(String(value || ""));
-}
-
-async function fetchContractAbi(network, address) {
-  const chain = getChain(network);
-  const apiUrl = getExplorerApiUrl(network);
-
-  const apiKey = process.env.ETHERSCAN_API_KEY;
-  if (!apiKey) {
-    throw new Error("Missing ETHERSCAN_API_KEY in environment");
-  }
-
-  const url = new URL(apiUrl);
-  url.searchParams.set("module", "contract");
-  url.searchParams.set("action", "getabi");
-  url.searchParams.set("address", address);
-  url.searchParams.set("apikey", apiKey);
-
-  if (isV2ExplorerApi(apiUrl)) {
-    url.searchParams.set("chainid", String(chain.id));
-  }
-
-  const response = await fetch(url.toString());
-  const data = await response.json();
-
-  if (data.status !== "1") {
-    throw new Error(data.result || "Unable to fetch contract ABI");
-  }
-
-  const abi = typeof data.result === "string" ? JSON.parse(data.result) : data.result;
-
-  if (!Array.isArray(abi)) {
-    throw new Error("Explorer returned an invalid ABI format");
-  }
-
-  return abi;
 }
 
 const providerCache = new Map();
@@ -126,6 +51,9 @@ async function getProvider(networkName) {
 }
 
 export async function submitUserOperation(payload, network) {
+
+  console.log("[submitUserOperation.payload]", payload);
+  
   const provider = await getProvider(network);
 
   const target = payload.contractAddress;
@@ -133,24 +61,10 @@ export async function submitUserOperation(payload, network) {
     throw new Error("Missing or invalid contractAddress in request");
   }
 
-  const abi = await fetchContractAbi(network, target);
-
-  const functionAbi = abi.find(
-    (item) =>
-      item.type === "function" &&
-      `${item.name}(${item.inputs.map((input) => input.type).join(",")})` ===
-        payload.functionSignature
-  );
-
-  if (!functionAbi) {
-    throw new Error(`Function ${payload.functionSignature} not found in contract ABI`);
+  const data = payload.calldata;
+  if (!data || typeof data !== "string" || !data.startsWith("0x")) {
+    throw new Error("Missing or invalid calldata in request");
   }
-
-  const data = encodeFunctionData({
-    abi: [functionAbi],
-    functionName: functionAbi.name,
-    args: payload.args || [],
-  });
 
   const result = await provider.sendUserOperation({
     uo: {
@@ -164,7 +78,10 @@ export async function submitUserOperation(payload, network) {
   try {
     txHash = await provider.waitForUserOperationTransaction({ hash: result.hash });
   } catch (waitErr) {
-    console.warn("[aa-provider] waitForUserOperationTransaction failed:", waitErr.message);
+    console.warn(
+      "[aa-provider] waitForUserOperationTransaction failed:",
+      waitErr.message
+    );
   }
 
   return {

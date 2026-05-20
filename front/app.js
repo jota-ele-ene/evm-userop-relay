@@ -68,8 +68,8 @@ function renderFunctionOptions(functions) {
   functionSelect.innerHTML = functions
     .map(
       (fn) =>
-        `<option value="${escapeHtml(fn.signature)}">${escapeHtml(
-          fn.signature
+        `<option value="${escapeHtml(fn.name)}">${escapeHtml(
+          fn.signature || fn.name
         )}</option>`
     )
     .join("");
@@ -111,7 +111,8 @@ function getExampleValue(input, depth = 0) {
     );
   }
 
-  if (baseType === "address") return "0x0000000000000000000000000000000000000000";
+  if (baseType === "address")
+    return "0x0000000000000000000000000000000000000000";
   if (baseType === "bool") return true;
   if (baseType === "string") return "";
   if (baseType === "bytes") return "0x";
@@ -153,7 +154,7 @@ function renderInputHelp(input) {
 }
 
 function getSelectedFunction() {
-  return availableFunctions.find((fn) => fn.signature === functionSelect.value);
+  return availableFunctions.find((fn) => fn.name === functionSelect.value);
 }
 
 function selectedFunctionSupportsJsonFlow(fn) {
@@ -180,7 +181,10 @@ function updateTupleJsonForSelectedFunction(fn) {
     return;
   }
 
-  if (inputs.length === 1 && (inputs[0].type === "tuple" || inputs[0].type.startsWith("tuple["))) {
+  if (
+    inputs.length === 1 &&
+    (inputs[0].type === "tuple" || inputs[0].type.startsWith("tuple["))
+  ) {
     tupleJsonField.value = getTuplePlaceholder(inputs[0]);
     return;
   }
@@ -191,9 +195,9 @@ function updateTupleJsonForSelectedFunction(fn) {
 function buildJsonEndpoint(action) {
   const network = encodeURIComponent(networkSelect.value);
   const contractAddress = encodeURIComponent(contractAddressInput.value.trim());
-  const functionSignature = encodeURIComponent(functionSelect.value);
+  const functionName = encodeURIComponent(functionSelect.value);
 
-  return `api/${action}/${network}/${contractAddress}/${functionSignature}`;
+  return `api/${action}/${network}/${contractAddress}/${functionName}`;
 }
 
 function getTupleJsonBody() {
@@ -214,6 +218,7 @@ async function postJsonAction(action) {
   const contractAddress = contractAddressInput.value.trim();
   const network = networkSelect.value;
   const selectedFunction = getSelectedFunction();
+  const mode = document.getElementById("submitMode").value;
 
   if (!contractAddress) {
     renderResponse("<p>Introduce una dirección de contrato válida.</p>");
@@ -239,7 +244,7 @@ async function postJsonAction(action) {
 
   let body;
   try {
-    body = getTupleJsonBody();
+    body = { json: getTupleJsonBody(), mode };
   } catch (error) {
     renderResponse(`<p>${escapeHtml(error.message)}</p>`);
     return;
@@ -248,6 +253,8 @@ async function postJsonAction(action) {
   const loadingText =
     action === "validate-input-json"
       ? "<p>Validando JSON...</p>"
+      : mode === "direct"
+      ? "<p>Enviando transacción directa...</p>"
       : "<p>Enviando UserOperation...</p>";
 
   renderResponse(loadingText);
@@ -272,6 +279,7 @@ async function postJsonAction(action) {
       renderResponse(`
         <h2>JSON válido</h2>
         <p><strong>Función:</strong> ${escapeHtml(data.function?.name || "")}</p>
+        <p><strong>Firma canónica:</strong> ${escapeHtml(data.functionSignature || "")}</p>
         <p><strong>Contrato:</strong> ${escapeHtml(contractAddress)}</p>
         <h3>Args normalizados</h3>
         <pre>${escapeHtml(JSON.stringify(data.normalizedArgs, null, 2))}</pre>
@@ -286,7 +294,12 @@ async function postJsonAction(action) {
     const contractUrl = data.explorer?.contractUrl;
 
     renderResponse(`
-      <h2>UserOperation enviada</h2>
+      <h2>${mode === "direct" ? "Transacción enviada" : "UserOperation enviada"}</h2>
+
+      <p>
+        <strong>Firma canónica:</strong>
+        ${escapeHtml(data.functionSignature || "")}
+      </p>
 
       <p>
         <strong>UO Hash:</strong>

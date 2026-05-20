@@ -2,105 +2,92 @@ import "dotenv/config";
 import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
-import { submitUserOperation } from "./userOperation.js";
-import {
-  sepolia,
-  polygon,
-  polygonAmoy,
-  base,
-  optimism,
-  arbitrum,
-  mainnet,
-} from "@account-kit/infra";
 import { encodeFunctionData } from "viem";
+
+import { submitUserOperation } from "./userOperation.js";
+import { submitDirectTransaction } from "./directTransaction.js";
+import {
+  NETWORKS,
+  getChain,
+  getRpcUrl,
+  getExplorerBaseUrl,
+  getExplorerApiUrl,
+  buildExplorerTxUrl,
+  buildExplorerAddressUrl,
+  buildExplorerUserOpUrl,
+  isV2ExplorerApi,
+} from "./chains.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const frontDir = path.join(__dirname, "../front");
 
-const NETWORKS = {
-  ethereum: mainnet,
-  sepolia,
-  polygon,
-  amoy: polygonAmoy,
-  base,
-  optimism,
-  arbitrum,
-  mainnet,
-};
+const app = express();
+const port = process.env.PORT || 3000;
 
-function getChain(network) {
-  const normalized = String(network || "").trim().toLowerCase();
-  const chain = NETWORKS[normalized];
-
-  if (!chain) {
-    throw new Error(`Network not supported: ${network}`);
-  }
-
-  return chain;
-}
-
-function getRpcUrl(chain) {
-  return (
-    chain.rpcUrls?.alchemy?.http?.[0] ||
-    chain.rpcUrls?.default?.http?.[0] ||
-    ""
-  );
-}
-
-function getExplorerBaseUrl(network) {
-  const chain = getChain(network);
-
-  console.log("[explorer]", {
-    network,
-    chainName: chain.name,
-    chainId: chain.id,
-    explorerUrl: chain.blockExplorers?.default?.url || null,
-    explorerApiUrl: chain.blockExplorers?.default?.apiUrl || null,
-  });
-
-  return chain.blockExplorers?.default?.url || "";
-}
-
-function getExplorerApiUrl(network) {
-  const chain = getChain(network);
-  const apiUrl = chain.blockExplorers?.default?.apiUrl;
-
-  console.log("[explorer-api] network:", network);
-  console.dir(chain.blockExplorers, { depth: null });
-
-  if (!apiUrl) {
-    throw new Error(`Explorer API not available for network: ${network}`);
-  }
-
-  return apiUrl;
-}
-
-function buildExplorerTxUrl(network, txHash) {
-  const baseUrl = getExplorerBaseUrl(network);
-  if (!baseUrl || !txHash) return null;
-  return `${baseUrl.replace(/\/$/, "")}/tx/${encodeURIComponent(txHash)}`;
-}
-
-function buildExplorerAddressUrl(network, address) {
-  const baseUrl = getExplorerBaseUrl(network);
-  if (!baseUrl || !address) return null;
-  return `${baseUrl.replace(/\/$/, "")}/address/${encodeURIComponent(address)}`;
-}
-
-function buildExplorerUserOpUrl(network, userOpHash) {
-  const baseUrl = getExplorerBaseUrl(network);
-  if (!baseUrl || !userOpHash) return null;
-
-  return `${baseUrl.replace(/\/$/, "")}/inputdatadecoder?tx=${encodeURIComponent(userOpHash)}`;
-}
-
-function isV2ExplorerApi(apiUrl) {
-  return apiUrl.includes("/v2/") || apiUrl.includes("etherscan.io/v2");
-}
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
 
 function isAddress(value) {
   return /^0x[a-fA-F0-9]{40}$/.test(String(value || ""));
+}
+
+function serializeBigInt(value) {
+  return JSON.parse(
+    JSON.stringify(value, (_, item) =>
+      typeof item === "bigint" ? item.toString() : item
+    )
+  );
+}
+
+function extractModeAndInputJson(body, queryMode) {
+  const safeBody = body || {};
+  const mode = safeBody.mode || queryMode || "userop";
+
+  if (
+    safeBody.json &&
+    typeof safeBody.json === "object" &&
+    !Array.isArray(safeBody.json)
+  ) {
+    return {
+      mode,
+      inputJson: safeBody.json,
+    };
+  }
+
+  const { mode: _mode, ...inputJson } = safeBody;
+  return {
+    mode,
+    inputJson,
+  };
+}
+
+async function submitCall(
+  { contractAddress, functionSignature, args, calldata },
+  network,
+  mode
+) {
+  if (mode === "direct") {
+    return await submitDirectTransaction(
+      {
+        contractAddress,
+        functionSignature,
+        args,
+        calldata,
+      },
+      network
+    );
+  }
+
+  return await submitUserOperation(
+    {
+      contractAddress,
+      functionSignature,
+      args,
+      calldata,
+    },
+    network
+  );
 }
 
 async function fetchContractAbi(network, address) {
@@ -129,7 +116,8 @@ async function fetchContractAbi(network, address) {
     throw new Error(data.result || "Unable to fetch contract ABI");
   }
 
-  const abi = typeof data.result === "string" ? JSON.parse(data.result) : data.result;
+  const abi =
+    typeof data.result === "string" ? JSON.parse(data.result) : data.result;
 
   if (!Array.isArray(abi)) {
     throw new Error("Explorer returned an invalid ABI format");
@@ -146,6 +134,40 @@ function normalizeAbiInput(input) {
   };
 }
 
+function abiInputToSignatureType(input) {
+  if (!input || !input.type) return "";
+
+  if (input.type === "tuple") {
+    const inner = (input.components || [])
+      .map(abiInputToSignatureType)
+      .join(",");
+    return `(${inner})`;
+  }
+
+  if (input.type === "tuple[]") {
+    const inner = (input.components || [])
+      .map(abiInputToSignatureType)
+      .join(",");
+    return `(${inner})[]`;
+  }
+
+  if (input.type.startsWith("tuple[")) {
+    const suffix = input.type.slice("tuple".length);
+    const inner = (input.components || [])
+      .map(abiInputToSignatureType)
+      .join(",");
+    return `(${inner})${suffix}`;
+  }
+
+  return input.type;
+}
+
+function getCanonicalFunctionSignature(fn) {
+  return `${fn.name}(${(fn.inputs || [])
+    .map(abiInputToSignatureType)
+    .join(",")})`;
+}
+
 function formatAbiFunctions(abi) {
   if (!Array.isArray(abi)) {
     throw new Error("ABI must be an array");
@@ -154,27 +176,158 @@ function formatAbiFunctions(abi) {
   return abi
     .filter((item) => item.type === "function")
     .filter(
-      (item) => item.stateMutability !== "view" && item.stateMutability !== "pure"
+      (item) =>
+        item.stateMutability !== "view" && item.stateMutability !== "pure"
     )
     .map((fn) => ({
       name: fn.name,
-      signature: `${fn.name}(${fn.inputs.map((input) => input.type).join(",")})`,
+      signature: getCanonicalFunctionSignature(fn),
       inputs: fn.inputs.map(normalizeAbiInput),
     }));
 }
 
-const app = express();
-const port = process.env.PORT || 3000;
-
-app.use(express.urlencoded({ extended: true }));
-app.use(express.json());
-
-function serializeBigInt(value) {
-  return JSON.parse(
-    JSON.stringify(value, (_, item) =>
-      typeof item === "bigint" ? item.toString() : item
-    )
+function getFunctionFromAbi(abi, functionName) {
+  const functions = abi.filter(
+    (item) => item.type === "function" && item.name === functionName
   );
+
+  console.log("[requested functionName]", functionName);
+  console.log(
+    "[available matches]",
+    functions.map(getCanonicalFunctionSignature)
+  );
+
+  if (functions.length === 0) {
+    const available = abi
+      .filter((item) => item.type === "function")
+      .map(getCanonicalFunctionSignature);
+
+    throw new Error(
+      `Function ${functionName} not found in contract ABI. Available: ${available.join(
+        " | "
+      )}`
+    );
+  }
+
+  if (functions.length > 1) {
+    const matches = functions.map(getCanonicalFunctionSignature);
+    throw new Error(
+      `Function ${functionName} is overloaded. Use full signature. Matches: ${matches.join(
+        " | "
+      )}`
+    );
+  }
+
+  return functions[0];
+}
+
+function normalizeJsonArgForInput(input, value) {
+  const type = input?.type || "";
+  const components = input?.components || [];
+
+  if (type.endsWith("[]")) {
+    if (!Array.isArray(value)) {
+      throw new Error(`Field "${input.name || type}" must be an array`);
+    }
+
+    const itemInput = { ...input, type: type.replace(/\[\]$/, "") };
+    return value.map((item) => normalizeJsonArgForInput(itemInput, item));
+  }
+
+  if (type === "tuple") {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error(`Field "${input.name || "tuple"}" must be a JSON object`);
+    }
+
+    return components.map((component, index) => {
+      const key = component.name || `field${index}`;
+
+      if (!(key in value)) {
+        throw new Error(
+          `Missing field "${key}" in tuple "${
+            input.name || "tuple"
+          }". Received keys: ${Object.keys(value).join(", ")}`
+        );
+      }
+
+      return normalizeJsonArgForInput(component, value[key]);
+    });
+  }
+
+  if (type.startsWith("tuple[")) {
+    if (!Array.isArray(value)) {
+      throw new Error(
+        `Field "${input.name || type}" must be an array of objects`
+      );
+    }
+
+    const itemType = type.replace(/\[[^\]]*\]$/, "");
+    const tupleInput = { ...input, type: itemType };
+
+    return value.map((item) => normalizeJsonArgForInput(tupleInput, item));
+  }
+
+  if (value === undefined) {
+    throw new Error(`Missing field "${input.name || type}"`);
+  }
+
+  return value;
+}
+
+async function buildValidatedCall({
+  network,
+  contractAddress,
+  functionName,
+  inputJson,
+}) {
+  if (!network) {
+    throw new Error('Path param "network" is required');
+  }
+
+  if (!contractAddress || !isAddress(contractAddress)) {
+    throw new Error('Path param "contractAddress" must be a valid address');
+  }
+
+  if (!functionName) {
+    throw new Error('Path param "functionName" is required');
+  }
+
+  const abi = await fetchContractAbi(network, contractAddress);
+  const functionAbi = getFunctionFromAbi(abi, functionName);
+  const inputs = functionAbi.inputs || [];
+  const functionSignature = getCanonicalFunctionSignature(functionAbi);
+
+  let args;
+
+  if (inputs.length === 0) {
+    args = [];
+  } else if (inputs.length === 1 && inputs[0].type === "tuple") {
+    args = [normalizeJsonArgForInput(inputs[0], inputJson)];
+  } else if (inputs.length === 1 && inputs[0].type.startsWith("tuple[")) {
+    args = [normalizeJsonArgForInput(inputs[0], inputJson)];
+  } else {
+    throw new Error(
+      "This endpoint only accepts functions with one tuple or tuple[] input"
+    );
+  }
+
+  const calldata = encodeFunctionData({
+    abi: [functionAbi],
+    functionName: functionAbi.name,
+    args,
+  });
+
+  console.log("[buildValidatedCall.calldata]", calldata);
+  console.log("[buildValidatedCall.args]", args);
+  console.log("[buildValidatedCall.functionAbi]", functionAbi);
+
+  return {
+    abi,
+    functionAbi,
+    functionSignature,
+    args,
+    calldata,
+  };
 }
 
 app.get("/api/networks", (req, res) => {
@@ -227,246 +380,177 @@ app.get("/api/contract-abi", async (req, res) => {
   }
 });
 
-function getFunctionFromAbi(abi, functionSignature) {
-  const fn = abi.find(
-    (item) =>
-      item.type === "function" &&
-      `${item.name}(${(item.inputs || []).map((input) => input.type).join(",")})` ===
-        functionSignature
-  );
+app.post(
+  "/api/validate-input-json/:network/:contractAddress/:functionName",
+  async (req, res) => {
+    try {
+      const { network, contractAddress, functionName } = req.params;
+      const { inputJson } = extractModeAndInputJson(req.body, req.query.mode);
 
-  if (!fn) {
-    throw new Error(`Function ${functionSignature} not found in contract ABI`);
-  }
+      console.log("[validate-input-json] req.body =", req.body);
 
-  return fn;
-}
-
-function normalizeJsonArgForInput(input, value) {
-  const type = input?.type || "";
-  const components = input?.components || [];
-
-  if (type.endsWith("[]")) {
-    if (!Array.isArray(value)) {
-      throw new Error(`Field "${input.name || type}" must be an array`);
-    }
-
-    const itemInput = { ...input, type: type.replace(/\[\]$/, "") };
-    return value.map((item) => normalizeJsonArgForInput(itemInput, item));
-  }
-
-  if (type === "tuple") {
-    if (!value || typeof value !== "object" || Array.isArray(value)) {
-      throw new Error(`Field "${input.name || "tuple"}" must be a JSON object`);
-    }
-
-    return components.map((component, index) => {
-      const key = component.name || `field${index}`;
-      return normalizeJsonArgForInput(component, value[key]);
-    });
-  }
-
-  if (type.startsWith("tuple[")) {
-    if (!Array.isArray(value)) {
-      throw new Error(`Field "${input.name || type}" must be an array of objects`);
-    }
-
-    const itemType = type.replace(/\[[^\]]*\]$/, "");
-    const tupleInput = { ...input, type: itemType };
-
-    return value.map((item) => normalizeJsonArgForInput(tupleInput, item));
-  }
-
-  if (value === undefined) {
-    throw new Error(`Missing field "${input.name || type}"`);
-  }
-
-  return value;
-}
-
-async function buildValidatedCall({ network, contractAddress, functionSignature, inputJson }) {
-  if (!network) {
-    throw new Error('Path param "network" is required');
-  }
-
-  if (!contractAddress || !isAddress(contractAddress)) {
-    throw new Error('Path param "contractAddress" must be a valid address');
-  }
-
-  if (!functionSignature) {
-    throw new Error('Path param "functionSignature" is required');
-  }
-
-  const abi = await fetchContractAbi(network, contractAddress);
-  const functionAbi = getFunctionFromAbi(abi, functionSignature);
-  const inputs = functionAbi.inputs || [];
-
-  let args;
-
-  if (inputs.length === 0) {
-    args = [];
-  } else if (inputs.length === 1 && inputs[0].type === "tuple") {
-    args = [normalizeJsonArgForInput(inputs[0], inputJson)];
-  } else if (inputs.length === 1 && inputs[0].type.startsWith("tuple[")) {
-    args = [normalizeJsonArgForInput(inputs[0], inputJson)];
-  } else {
-    throw new Error("This endpoint only accepts functions with one tuple or tuple[] input");
-  }
-
-  const calldata = encodeFunctionData({
-    abi: [functionAbi],
-    functionName: functionAbi.name,
-    args,
-  });
-
-  return {
-    abi,
-    functionAbi,
-    args,
-    calldata,
-  };
-}
-
-app.post("/api/validate-input-json/:network/:contractAddress/:functionSignature", async (req, res) => {
-  try {
-    const { network, contractAddress, functionSignature } = req.params;
-    const inputJson = req.body;
-
-    const validated = await buildValidatedCall({
-      network,
-      contractAddress,
-      functionSignature,
-      inputJson,
-    });
-
-    return res.json({
-      status: "ok",
-      network,
-      contractAddress,
-      functionSignature,
-      explorerBaseUrl: getExplorerBaseUrl(network),
-      function: {
-        name: validated.functionAbi.name,
-        inputs: validated.functionAbi.inputs,
-      },
-      normalizedArgs: serializeBigInt(validated.args),
-      calldata: validated.calldata,
-    });
-  } catch (error) {
-    console.error("[api/validate-input-json] error:", error);
-
-    return res.status(400).json({
-      status: "error",
-      message: error?.message || "Validation failed",
-      error: {
-        name: error?.name || "Error",
-        shortMessage: error?.shortMessage || null,
-        details: error?.details || null,
-        cause: error?.cause?.message || null,
-      },
-      receivedBody: req.body,
-    });
-  }
-});
-
-app.post("/api/submit-json/:network/:contractAddress/:functionSignature", async (req, res) => {
-  try {
-    const { network, contractAddress, functionSignature } = req.params;
-    const inputJson = req.body;
-
-    const validated = await buildValidatedCall({
-      network,
-      contractAddress,
-      functionSignature,
-      inputJson,
-    });
-
-    const result = await submitUserOperation(
-      {
+      const validated = await buildValidatedCall({
+        network,
         contractAddress,
-        functionSignature,
-        args: validated.args,
-      },
-      network
-    );
+        functionName,
+        inputJson,
+      });
 
-    const explorerBaseUrl = getExplorerBaseUrl(network);
-    const txUrl = buildExplorerTxUrl(network, result.txHash);
-    const contractUrl = buildExplorerAddressUrl(network, contractAddress);
-    const userOpUrl = buildExplorerUserOpUrl(network, result.hash);
-
-    console.log("[submit-json/explorer]", {
-      network,
-      baseUrl: explorerBaseUrl,
-      txHash: result.txHash,
-      txUrl,
-      contractAddress,
-      contractUrl,
-      userOpHash: result.hash,
-      userOpUrl,
-    });
-
-    return res.json({
-      status: "ok",
-      network,
-      contractAddress,
-      functionSignature,
-      explorer: {
-        baseUrl: explorerBaseUrl,
-        txUrl,
-        userOpUrl,
-        contractUrl,
-      },
-      validation: {
+      return res.json({
+        status: "ok",
+        network,
+        contractAddress,
+        functionName,
+        functionSignature: validated.functionSignature,
+        explorerBaseUrl: getExplorerBaseUrl(network),
+        function: {
+          name: validated.functionAbi.name,
+          inputs: validated.functionAbi.inputs,
+        },
         normalizedArgs: serializeBigInt(validated.args),
         calldata: validated.calldata,
-      },
-      result: serializeBigInt(result),
-    });
-  } catch (error) {
-    console.error("[api/submit-json] error:", error);
+      });
+    } catch (error) {
+      console.error("[api/validate-input-json] error:", error);
 
-    return res.status(400).json({
-      status: "error",
-      message: error?.message || "Submit failed",
-      error: {
-        name: error?.name || "Error",
-        shortMessage: error?.shortMessage || null,
-        details: error?.details || null,
-        cause: error?.cause?.message || null,
-      },
-      receivedBody: req.body,
-    });
+      return res.status(400).json({
+        status: "error",
+        message: error?.message || "Validation failed",
+        error: {
+          name: error?.name || "Error",
+          shortMessage: error?.shortMessage || null,
+          details: error?.details || null,
+          cause: error?.cause?.message || null,
+        },
+        receivedBody: req.body,
+      });
+    }
   }
-});
+);
+
+app.post(
+  "/api/submit-json/:network/:contractAddress/:functionName",
+  async (req, res) => {
+    try {
+      const { network, contractAddress, functionName } = req.params;
+      const { mode, inputJson } = extractModeAndInputJson(req.body, req.query.mode);
+
+      console.log("[submit-json] req.body =", req.body);
+
+      const validated = await buildValidatedCall({
+        network,
+        contractAddress,
+        functionName,
+        inputJson,
+      });
+
+      console.log("[submit-json.validated]", {
+        functionSignature: validated.functionSignature,
+        calldata: validated.calldata,
+        args: validated.args,
+      });
+
+      const result = await submitCall(
+        {
+          contractAddress,
+          functionSignature: validated.functionSignature,
+          args: validated.args,
+          calldata: validated.calldata,
+        },
+        network,
+        mode
+      );
+
+      const explorerBaseUrl = getExplorerBaseUrl(network);
+      const txUrl = buildExplorerTxUrl(network, result.txHash);
+      const contractUrl = buildExplorerAddressUrl(network, contractAddress);
+      const userOpUrl = buildExplorerUserOpUrl(
+        network,
+        result.hash ?? result.txHash
+      );
+
+      console.log("[submit-json/explorer]", {
+        mode,
+        network,
+        baseUrl: explorerBaseUrl,
+        txHash: result.txHash,
+        txUrl,
+        contractAddress,
+        contractUrl,
+        userOpHash: result.hash ?? result.txHash,
+        userOpUrl,
+      });
+
+      return res.json({
+        status: "ok",
+        mode,
+        network,
+        contractAddress,
+        functionName,
+        functionSignature: validated.functionSignature,
+        explorer: {
+          baseUrl: explorerBaseUrl,
+          txUrl,
+          userOpUrl,
+          contractUrl,
+        },
+        validation: {
+          normalizedArgs: serializeBigInt(validated.args),
+          calldata: validated.calldata,
+        },
+        result: serializeBigInt(result),
+      });
+    } catch (error) {
+      console.error("[api/submit-json] error:", error);
+
+      return res.status(400).json({
+        status: "error",
+        message: error?.message || "Submit failed",
+        error: {
+          name: error?.name || "Error",
+          shortMessage: error?.shortMessage || null,
+          details: error?.details || null,
+          cause: error?.cause?.message || null,
+        },
+        receivedBody: req.body,
+      });
+    }
+  }
+);
 
 app.post("/api/submit", async (req, res) => {
   try {
-    const { contractAddress, functionSignature, args, network } = req.body;
+    const {
+      contractAddress,
+      functionSignature,
+      args,
+      network,
+      mode = "userop",
+      calldata,
+    } = req.body || {};
 
-    const result = await submitUserOperation(
-      { contractAddress, functionSignature, args },
-      network
+    const result = await submitCall(
+      {
+        contractAddress,
+        functionSignature,
+        args,
+        calldata,
+      },
+      network,
+      mode
     );
 
     const explorerBaseUrl = getExplorerBaseUrl(network);
     const txUrl = buildExplorerTxUrl(network, result.txHash);
     const contractUrl = buildExplorerAddressUrl(network, contractAddress);
-    const userOpUrl = buildExplorerUserOpUrl(network, result.hash);
-
-    console.log("[submit/explorer]", {
+    const userOpUrl = buildExplorerUserOpUrl(
       network,
-      baseUrl: explorerBaseUrl,
-      txHash: result.txHash,
-      txUrl,
-      contractAddress,
-      contractUrl,
-      userOpHash: result.hash,
-      userOpUrl,
-    });
+      result.hash ?? result.txHash
+    );
 
     res.json({
       status: "ok",
+      mode,
       result: serializeBigInt(result),
       explorer: {
         baseUrl: explorerBaseUrl,
